@@ -1,0 +1,456 @@
+#!/bin/bash
+
+# VARIABLES
+OUTPUT_DIR=""
+
+# COLORS
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+PURPLE='\033[0;35m'
+RESET='\033[0m'
+
+# FUNCTION TO HIDE THE CURSOR
+hide_cursor() {
+    echo -e "\033[?25l"
+}
+
+# FUNCTION TO SHOW THE CURSOR
+show_cursor() {
+    echo -e "\033[?25h"
+}
+
+# VISUALIZER FUNCTION
+show_spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while kill -0 "$pid" 2>/dev/null; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        spinstr=$temp${spinstr%"$temp"}
+        sleep "$delay"
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+# MESSAGE LOGGING
+log() {
+    if [[ -z "$OUTPUT_DIR" ]]; then
+        echo -e "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+    else
+        echo -e "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${OUTPUT_DIR}/script.log"
+    fi
+}
+
+# ERROR HANDLING
+error_exit() {
+    local message="$1"
+    if [ "$SKIP_CURRENT" == "false" ]; then
+        if [[ -z "$OUTPUT_DIR" ]]; then
+            echo -e "${RED}Error: $message${RESET}"
+        else
+            echo -e "${RED}Error: $message${RESET}" | tee -a "${OUTPUT_DIR}/script.log"
+        fi
+    fi
+    if [[ -n "$OUTPUT_DIR" ]]; then
+        echo "$message" >> "${OUTPUT_DIR}/error.log"
+    fi
+    show_cursor  # Ensure cursor is shown if an error occurs
+    exit 1
+}
+
+# CHECKING IF COMMAND EXISTS
+check_command() {
+    command -v "$1" >/dev/null 2>&1 || error_exit "$1 is required but it's not installed."
+}
+
+# Function to prompt user for input
+prompt_user() {
+    echo -e "${YELLOW}Enter the target domain or the path to a .txt file containing a list of domains:${RESET}"
+    read -r TARGET
+
+    if [[ -f $TARGET ]]; then
+        DOMAIN_LIST=true
+    else
+        DOMAIN_LIST=false
+    fi
+
+    # Default directory to current working directory
+    DEFAULT_OUTPUT_DIR=$(pwd)
+    echo -e "${YELLOW}Enter the directory where output files will be saved (default: $DEFAULT_OUTPUT_DIR):${RESET}"
+    read -r OUTPUT_DIR
+
+    # Use the default directory if no input is provided
+    OUTPUT_DIR=${OUTPUT_DIR:-$DEFAULT_OUTPUT_DIR}
+
+    # Create the directory if it doesn't exist
+    mkdir -p "$OUTPUT_DIR"
+
+    echo -e "${CYAN}Do you want to use custom flags? (y/n)${RESET}"
+    read -r CUSTOM_FLAGS
+    if [[ $CUSTOM_FLAGS == "y" ]]; then
+        echo -e "${GREEN}Enter the custom flags for subfinder (default: -all -recursive):${RESET}"
+        read -r SUBFINDER_FLAGS
+        SUBFINDER_FLAGS=${SUBFINDER_FLAGS:-"-all -recursive"}
+        
+        echo -e "${GREEN}Enter the custom flags for httpx (default: -ports 80,443,8080,8000,8888 -threads 200):${RESET}"
+        read -r HTTPX_FLAGS
+        HTTPX_FLAGS=${HTTPX_FLAGS:-"-ports 80,443,8080,8000,8888 -threads 200"}
+
+        echo -e "${GREEN}Enter the custom flags for naabu (default: -c 50 -nmap-cli 'nmap -sV -sC'):${RESET}"
+        read -r NAABU_FLAGS
+        NAABU_FLAGS=${NAABU_FLAGS:-"-c 50 -nmap-cli 'nmap -sV -sC'"}
+
+        echo -e "${GREEN}Enter the custom flags for dirsearch (default: -x 500,502,429,404,400 -R 5 --random-agent -t 100 -F):${RESET}"
+        read -r DIRSEARCH_FLAGS
+        DIRSEARCH_FLAGS=${DIRSEARCH_FLAGS:-"-x 500,502,429,404,400 -R 5 --random-agent -t 100 -F"}
+
+        echo -e "${GREEN}Enter the custom flags for nuclei (default: -c 70 -rl 200 -fhr -lfa):${RESET}"
+        read -r NUCLEI_FLAGS
+        NUCLEI_FLAGS=${NUCLEI_FLAGS:-"-c 70 -rl 200 -fhr -lfa"}
+
+        echo -e "${GREEN}Enter the custom flags for katana (default: -d 5 -ps -pss waybackarchive,commoncrawl,alienvault -kf -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif,svg):${RESET}"
+        read -r KATANA_FLAGS
+        KATANA_FLAGS=${KATANA_FLAGS:-"-d 5 -ps -pss waybackarchive,commoncrawl,alienvault -kf -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif,svg"}
+    else
+        SUBFINDER_FLAGS="-all -recursive"
+        HTTPX_FLAGS="-ports 80,443,8080,8000,8888 -threads 200"
+        NAABU_FLAGS="-c 50 -nmap-cli 'nmap -sV -sC'"
+        DIRSEARCH_FLAGS="-x 500,502,429,404,400 -R 5 --random-agent -t 100 -F"
+        NUCLEI_FLAGS="-c 70 -rl 200 -fhr -lfa -no-mhe"
+        KATANA_FLAGS="-d 5 -ps -pss waybackarchive,commoncrawl,alienvault -kf -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif,svg"
+    fi
+}
+
+# CLEANING DOMAINS
+clean_domains() {
+    if [[ -f $TARGET ]]; then
+        log "Cleaning the domain list from $TARGET"
+        awk -F/ '{print $NF}' "$TARGET" | sed 's/^www\.//' | sed 's/^https\?:\/\///' | sort -u > "${OUTPUT_DIR}/cleaned-domains.txt"
+        TARGET="${OUTPUT_DIR}/cleaned-domains.txt"
+        log "Domains cleaned and saved to cleaned-domains.txt"
+    else
+        log "No domain list file provided, skipping domain cleaning"
+    fi
+}
+
+# TRAP SIGNAL HANDLER
+trap_signal() {
+    case "$1" in
+        SIGQUIT)
+            # Handle Ctrl+\ (SIGQUIT) to skip to the next tool
+            if [[ -n "$OUTPUT_DIR" ]]; then
+                log "Signal received, skipping current tool"
+            fi
+            SKIP_CURRENT=true
+            if [ -n "$CURRENT_PID" ]; then
+                kill -TERM "$CURRENT_PID" 2>/dev/null || true
+                wait $CURRENT_PID 2>/dev/null || true
+            fi
+            show_cursor  # Ensure cursor is shown if a signal is received
+            ;;
+        SIGINT)
+            # Handle Ctrl+C (SIGINT) to exit the script
+            log "Ctrl+C pressed, exiting the script"
+            show_cursor  # Ensure cursor is shown if exiting
+            exit 1
+            ;;
+        SIGTERM)
+            # Handle termination signal
+            if [[ -n "$OUTPUT_DIR" ]]; then
+                log "Termination signal received, exiting the script"
+            fi
+            show_cursor  # Ensure cursor is shown if exiting
+            exit 1
+            ;;
+    esac
+}
+
+# SET TRAPS FOR SIGQUIT, SIGINT, AND SIGTERM
+trap 'trap_signal SIGQUIT' SIGQUIT
+trap 'trap_signal SIGINT' SIGINT
+trap 'trap_signal SIGTERM' SIGTERM
+
+# SUBFINDER FUNCTION
+run_subfinder() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running subfinder"
+
+    hide_cursor  # Hide cursor before running the tool
+    if [[ $DOMAIN_LIST == true ]]; then
+        subfinder -dL "$TARGET" $SUBFINDER_FLAGS > "${OUTPUT_DIR}/subdomain.txt" &
+    else
+        subfinder -d "$TARGET" $SUBFINDER_FLAGS > "${OUTPUT_DIR}/subdomain.txt" &
+    fi
+    CURRENT_PID=$!
+    show_spinner $CURRENT_PID
+    wait $CURRENT_PID
+    show_cursor  # Show cursor after the tool has finished
+
+    if [ "$SKIP_CURRENT" = true ]; then
+        log "Subfinder skipped"
+    else
+        log "Subfinder completed"
+    fi
+    echo "run_subfinder" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+# HTTPX FUNCTION
+run_httpx() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running httpx"
+
+    hide_cursor  # Hide cursor before running the tool
+    httpx $HTTPX_FLAGS < "${OUTPUT_DIR}/subdomain.txt" > "${OUTPUT_DIR}/alive-subs.txt" &
+    CURRENT_PID=$!
+    show_spinner $CURRENT_PID
+    wait $CURRENT_PID
+    show_cursor  # Show cursor after the tool has finished
+
+    if [ "$SKIP_CURRENT" = true ]; then
+        log "httpx skipped"
+    else
+        if [[ ! -s "${OUTPUT_DIR}/alive-subs.txt" ]]; then
+            error_exit "httpx did not find any alive subdomains or the output file is empty: alive-subs.txt"
+        fi
+        log "httpx completed"
+    fi
+    echo "run_httpx" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+# NAABU FUNCTION
+run_naabu() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running naabu"
+
+    hide_cursor  # Hide cursor before running the tool
+    naabu -list "${OUTPUT_DIR}/alive-subs.txt" -c 50 -nmap-cli "nmap -sV -sC" -o "${OUTPUT_DIR}/naabu-full.txt" &
+    CURRENT_PID=$!
+    show_spinner $CURRENT_PID
+    wait $CURRENT_PID
+    show_cursor  # Show cursor after the tool has finished
+
+    # Check if naabu-output.txt is empty
+    if [[ ! -s "${OUTPUT_DIR}/naabu-output.txt" ]]; then
+        log "Warning: naabu did not find any open ports or the output file is empty: naabu-output.txt"
+    fi
+
+    if [ "$SKIP_CURRENT" = true ]; then
+        log "naabu skipped"
+    else
+        log "naabu completed"
+    fi
+    echo "run_naabu" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+run_dirsearch() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running dirsearch"
+
+    hide_cursor  # Hide cursor before running the tool
+
+    # ABSOLUTE PATH OF THE ALIVE SUBDOMAINS FILE
+    ABSOLUTE_ALIVE_SUBS_FILE="$(realpath "${OUTPUT_DIR}/alive-subs.txt")"
+
+    # Check if the file exists
+    if [[ -f "$ABSOLUTE_ALIVE_SUBS_FILE" ]]; then
+        dirsearch -l "$ABSOLUTE_ALIVE_SUBS_FILE" $DIRSEARCH_FLAGS -o "${OUTPUT_DIR}/dirsearch-scan.txt" &
+        CURRENT_PID=$!
+        show_spinner $CURRENT_PID
+        wait $CURRENT_PID
+        show_cursor  # Show cursor after the tool has finished
+
+        if [ "$SKIP_CURRENT" = true ]; then
+            log "dirsearch skipped"
+        else
+            log "dirsearch completed"
+        fi
+    else
+        error_exit "The file containing URLs does not exist: $ABSOLUTE_ALIVE_SUBS_FILE"
+    fi
+
+    echo "run_dirsearch" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+# NUCLEI FUNCTION
+run_nuclei() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running nuclei"
+
+    hide_cursor  # Hide cursor before running the tool
+    nuclei -l "${OUTPUT_DIR}/alive-subs.txt" $NUCLEI_FLAGS -o "${OUTPUT_DIR}/nuclei-output.txt" &
+    CURRENT_PID=$!
+    show_spinner $CURRENT_PID
+    wait $CURRENT_PID
+    show_cursor  # Show cursor after the tool has finished
+
+    if [ "$SKIP_CURRENT" = true ]; then
+        log "nuclei skipped"
+    else
+        if [[ ! -s "${OUTPUT_DIR}/nuclei-output.txt" ]]; then
+            log "Warning: nuclei did not find any vulnerabilities or the output file is empty: nuclei-output.txt"
+        fi
+        log "nuclei completed"
+    fi
+    echo "run_nuclei" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+
+# PARAMETER EXTRACTION AND FILTERATION FUNCTION
+extract_filter_params() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Extracting and filtering params"
+
+    hide_cursor  # Hide cursor before running the tool
+
+    if [[ -s "${OUTPUT_DIR}/alive-subs.txt" ]]; then
+        (
+            cat "${OUTPUT_DIR}/alive-subs.txt" | gau > "${OUTPUT_DIR}/params.txt" &
+            CURRENT_PID=$!
+            show_spinner $CURRENT_PID
+            wait $CURRENT_PID
+            show_cursor  # Show cursor after the tool has finished
+
+            if [ "$SKIP_CURRENT" = true ]; then
+                log "Parameter extraction skipped"
+            else
+                if [[ -s "${OUTPUT_DIR}/params.txt" ]]; then
+                    uro -o "${OUTPUT_DIR}/filtered-params.txt" < "${OUTPUT_DIR}/params.txt"
+                    if [[ -s "${OUTPUT_DIR}/filtered-params.txt" ]]; then
+                        log "Params extracted and filtered"
+                    else
+                        error_exit "Filtering parameters failed. filtered-params.txt is empty or was not created."
+                    fi
+                else
+                    error_exit "Gau did not produce any output. Check the input file: alive-subs.txt"
+                fi
+            fi
+        )
+    else
+        error_exit "The alive subdomains file does not exist or is empty: alive-subs.txt"
+    fi
+    echo "extract_filter_params" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+# KATANA FUNCTION
+run_katana() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Running katana"
+
+    hide_cursor  # Hide cursor before running the tool
+    katana -d "${TARGET}" $KATANA_FLAGS -o "${OUTPUT_DIR}/katana-output.txt" &
+    CURRENT_PID=$!
+    show_spinner $CURRENT_PID
+    wait $CURRENT_PID
+    show_cursor  # Show cursor after the tool has finished
+
+    if [ "$SKIP_CURRENT" = true ]; then
+        log "katana skipped"
+    else
+        log "katana completed"
+    fi
+    echo "run_katana" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+# Function to resume the script from the last step
+resume_from_last_step() {
+    if [[ -f "${OUTPUT_DIR}/last_step.txt" ]]; then
+        last_step=$(cat "${OUTPUT_DIR}/last_step.txt")
+        case $last_step in
+            run_subfinder)
+                run_httpx
+                ;;
+            run_httpx)
+                run_naabu
+                ;;
+            run_naabu)
+                run_dirsearch
+                ;;
+            run_dirsearch)
+                extract_filter_params
+                ;;
+            extract_filter_params)
+                run_dirsearch_extensions
+                ;;
+            run_dirsearch_extensions)
+                run_nuclei
+                ;;
+            run_nuclei)
+                run_katana
+                ;;
+            *)
+                echo -e "${YELLOW}No valid last step found. Starting from the beginning.${RESET}"
+                ;;
+        esac
+    else
+        echo -e "${YELLOW}No last step file found. Starting from the beginning.${RESET}"
+    fi
+}
+
+# MAIN FUNCTION
+main() {
+    # ASCII art
+    echo -e "${BLUE}"
+    echo "____ ____ ____ ____ _  _ ____ ___ ____ ____"
+    echo "|__/ |___ |    |  | |\ | |__|  |  |  | |__/"
+    echo "|  \ |___ |___ |__| | \| |  |  |  |__| |  \\"
+    echo -e "${RED}"
+    echo "By Enit-y     github: https://github.com/Entit-y"
+    echo -e "${RESET}"
+
+    # Ensure required tools are installed
+    for tool in subfinder httpx naabu dirsearch gau uro secretfinder nuclei katana; do
+        check_command "$tool"
+    done
+
+    # PROMPTING USER FOR INPUT
+    prompt_user
+
+    # CHECK THE CHECKPOINT
+    check_last_step
+
+    # RUN TOOLS BASED ON LAST COMPLETED STEP
+    if [[ $last_step != "run_subfinder" ]]; then
+        clean_domains
+        run_subfinder
+    fi
+    if [[ $last_step != "run_httpx" ]]; then
+        run_httpx
+    fi
+    if [[ $last_step != "run_naabu" ]]; then
+        run_naabu
+    fi
+    if [[ $last_step != "run_dirsearch" ]]; then
+        run_dirsearch
+    fi
+    if [[ $last_step != "extract_filter_params" ]]; then
+        extract_filter_params
+    fi
+    if [[ $last_step != "find_js_files_secrets" ]]; then
+        find_js_files_secrets
+    fi
+    if [[ $last_step != "run_nuclei" ]]; then
+        run_nuclei
+    fi
+    if [[ $last_step != "run_katana" ]]; then
+        run_katana
+    fi
+    if [[ $last_step != "run_dirsearch_extensions" ]]; then
+        run_dirsearch_extensions
+    fi
+
+    log "All tasks completed"
+}
+
+main "$@"
