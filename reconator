@@ -49,12 +49,10 @@ log() {
 # ERROR HANDLING
 error_exit() {
     local message="$1"
-    if [ "$SKIP_CURRENT" == "false" ]; then
-        if [[ -z "$OUTPUT_DIR" ]]; then
-            echo -e "${RED}Error: $message${RESET}"
-        else
-            echo -e "${RED}Error: $message${RESET}" | tee -a "${OUTPUT_DIR}/script.log"
-        fi
+    if [[ -z "$OUTPUT_DIR" ]]; then
+        echo -e "${RED}Error: $message${RESET}" >&2
+    else
+        echo -e "${RED}Error: $message${RESET}" | tee -a "${OUTPUT_DIR}/script.log" >&2
     fi
     if [[ -n "$OUTPUT_DIR" ]]; then
         echo "$message" >> "${OUTPUT_DIR}/error.log"
@@ -65,7 +63,9 @@ error_exit() {
 
 # CHECKING IF COMMAND EXISTS
 check_command() {
-    command -v "$1" >/dev/null 2>&1 || error_exit "$1 is required but it's not installed."
+    if ! command -v "$1" >/dev/null 2>&1; then
+        error_exit "$1 is required but it's not installed."
+    fi
 }
 
 # Function to prompt user for input
