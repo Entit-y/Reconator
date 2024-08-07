@@ -143,9 +143,7 @@ trap_signal() {
     case "$1" in
         SIGQUIT)
             # Handle Ctrl+\ (SIGQUIT) to skip to the next tool
-            if [[ -n "$OUTPUT_DIR" ]]; then
-                log "Signal received, skipping current tool"
-            fi
+            log "Ctrl+\\ pressed, skipping current tool"
             SKIP_CURRENT=true
             if [ -n "$CURRENT_PID" ]; then
                 kill -TERM "$CURRENT_PID" 2>/dev/null || true
@@ -156,14 +154,16 @@ trap_signal() {
         SIGINT)
             # Handle Ctrl+C (SIGINT) to exit the script
             log "Ctrl+C pressed, exiting the script"
+            if [ -n "$CURRENT_PID" ]; then
+                kill -TERM "$CURRENT_PID" 2>/dev/null || true
+                wait $CURRENT_PID 2>/dev/null || true
+            fi
             show_cursor  # Ensure cursor is shown if exiting
             exit 1
             ;;
         SIGTERM)
             # Handle termination signal
-            if [[ -n "$OUTPUT_DIR" ]]; then
-                log "Termination signal received, exiting the script"
-            fi
+            log "Termination signal received, exiting the script"
             show_cursor  # Ensure cursor is shown if exiting
             exit 1
             ;;
@@ -175,6 +175,27 @@ trap 'trap_signal SIGQUIT' SIGQUIT
 trap 'trap_signal SIGINT' SIGINT
 trap 'trap_signal SIGTERM' SIGTERM
 
+# FUNCTION TO RUN CRT.SH
+run_crtsh() {
+    local domain="$1"
+    local crtsh_file="${OUTPUT_DIR}/crtsh-subdomains.txt"
+    
+    log "Running crt.sh for domain: $domain"
+    curl -s "https://crt.sh/?q=${domain}&output=json" | jq -r '.[].name_value' | grep -Po '(\w+\.\w+\.\w+)$' | sort -u | tee -a "$crtsh_file"
+
+    # Compare with subfinder output
+    local new_subdomains="${OUTPUT_DIR}/new-subdomains.txt"
+    comm -13 <(sort "$SUBDOMAIN_FILE" | uniq) <(sort "$crtsh_file" | uniq) > "$new_subdomains"
+
+    # Log new subdomains found
+    if [[ -s "$new_subdomains" ]]; then
+        log "New subdomains found by crt.sh:"
+        cat "$new_subdomains" | tee -a "$SUBDOMAIN_FILE"
+    else
+        log "No new subdomains found by crt.sh for domain: $domain"
+    fi
+}
+
 # SUBFINDER FUNCTION
 run_subfinder() {
     trap 'trap_signal' SIGQUIT
@@ -182,20 +203,35 @@ run_subfinder() {
     log "Running subfinder"
 
     hide_cursor  # Hide cursor before running the tool
+
+    SUBDOMAIN_FILE="${OUTPUT_DIR}/subdomain.txt"
+
     if [[ $DOMAIN_LIST == true ]]; then
-        subfinder -dL "$TARGET" $SUBFINDER_FLAGS > "${OUTPUT_DIR}/subdomain.txt" &
+        log "Running subfinder for a list of domains"
+        subfinder -dL "$TARGET" $SUBFINDER_FLAGS | anew "$SUBDOMAIN_FILE" &
+        CURRENT_PID=$!
+        show_spinner $CURRENT_PID
+        wait $CURRENT_PID
+        show_cursor  # Show cursor after the tool has finished
+        
+        for domain in $(cat "$TARGET"); do
+            run_crtsh "$domain"
+        done
     else
-        subfinder -d "$TARGET" $SUBFINDER_FLAGS > "${OUTPUT_DIR}/subdomain.txt" &
+        log "Running subfinder for a single domain"
+        subfinder -d "$TARGET" $SUBFINDER_FLAGS | anew "$SUBDOMAIN_FILE" &
+        CURRENT_PID=$!
+        show_spinner $CURRENT_PID
+        wait $CURRENT_PID
+        show_cursor  # Show cursor after the tool has finished
+
+        run_crtsh "$TARGET"
     fi
-    CURRENT_PID=$!
-    show_spinner $CURRENT_PID
-    wait $CURRENT_PID
-    show_cursor  # Show cursor after the tool has finished
 
     if [ "$SKIP_CURRENT" = true ]; then
         log "Subfinder skipped"
     else
-        log "Subfinder completed"
+        log "Subfinder and crt.sh completed"
     fi
     echo "run_subfinder" > "${OUTPUT_DIR}/last_step.txt"
 }
@@ -251,7 +287,8 @@ run_naabu() {
 }
 
 run_dirsearch() {
-    trap 'trap_signal' SIGQUIT
+    trap 'trap_signal SIGQUIT' SIGQUIT
+    trap 'trap_signal SIGINT' SIGINT
     SKIP_CURRENT=false
     log "Running dirsearch"
 
@@ -269,9 +306,9 @@ run_dirsearch() {
         show_cursor  # Show cursor after the tool has finished
 
         if [ "$SKIP_CURRENT" = true ]; then
-            log "dirsearch skipped"
+            log "Dirsearch skipped"
         else
-            log "dirsearch completed"
+            log "Dirsearch completed"
         fi
     else
         error_exit "The file containing URLs does not exist: $ABSOLUTE_ALIVE_SUBS_FILE"
@@ -297,9 +334,9 @@ run_nuclei() {
         log "nuclei skipped"
     else
         if [[ ! -s "${OUTPUT_DIR}/nuclei-output.txt" ]]; then
-            log "Warning: nuclei did not find any vulnerabilities or the output file is empty: nuclei-output.txt"
+            log ${RED}"Warning: nuclei did not find any vulnerabilities or the output file is empty: nuclei-output.txt"${RESET}
         fi
-        log "nuclei completed"
+        log ${GREEN}"nuclei completed"${RESET}
     fi
     echo "run_nuclei" > "${OUTPUT_DIR}/last_step.txt"
 }
@@ -327,20 +364,76 @@ extract_filter_params() {
                 if [[ -s "${OUTPUT_DIR}/params.txt" ]]; then
                     uro -o "${OUTPUT_DIR}/filtered-params.txt" < "${OUTPUT_DIR}/params.txt"
                     if [[ -s "${OUTPUT_DIR}/filtered-params.txt" ]]; then
-                        log "Params extracted and filtered"
+                        log ${GREEN}"Params extracted and filtered"${RESET}
                     else
-                        error_exit "Filtering parameters failed. filtered-params.txt is empty or was not created."
+                        log ${RED}"Filtering parameters failed. filtered-params.txt is empty or was not created."${RESET}
                     fi
                 else
-                    error_exit "Gau did not produce any output. Check the input file: alive-subs.txt"
+                    log ${RED}"Gau did not produce any output. Check the input file: alive-subs.txt"${RESET}
                 fi
             fi
         )
     else
-        error_exit "The alive subdomains file does not exist or is empty: alive-subs.txt"
+        log ${RED}"The alive subdomains file does not exist or is empty: alive-subs.txt"${RESET}
     fi
     echo "extract_filter_params" > "${OUTPUT_DIR}/last_step.txt"
 }
+
+# Function to find JavaScript files and secrets
+find_js_files_secrets() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Finding JavaScript files and extracting secrets"
+
+    hide_cursor  # Hide cursor before running the tool
+
+    if [[ -s "${OUTPUT_DIR}/filtered-params.txt" ]]; then
+        (
+            cat "${OUTPUT_DIR}/filtered-params.txt" | grep ".js$" > "${OUTPUT_DIR}/js-files.txt" &
+            CURRENT_PID=$!
+            show_spinner $CURRENT_PID
+            wait $CURRENT_PID
+            show_cursor  # Show cursor after the tool has finished
+
+            if [ "$SKIP_CURRENT" = true ]; then
+                log "Finding JavaScript files skipped"
+            else
+                if [[ -s "${OUTPUT_DIR}/js-files.txt" ]]; then
+                    cat "${OUTPUT_DIR}/js-files.txt" | uro | anew "${OUTPUT_DIR}/js-files.txt"
+                    if [[ -s "${OUTPUT_DIR}/js-files.txt" ]]; then
+                        cat "${OUTPUT_DIR}/js-files.txt" | while read -r url; do
+                            secretfinder -i "$url" -o cli >> "${OUTPUT_DIR}/secrets.txt"
+                        done
+                        log "JavaScript files and secrets extraction completed"
+                    else
+                        log ${RED}"Uro did not produce any output. Check the input file: js-files.txt"${RESET}
+                    fi
+                else
+                    log ${RED}"No JavaScript files found in filtered-params.txt"${RESET}
+                fi
+            fi
+        )
+    else
+        log ${RED}"The filtered parameters file does not exist or is empty: filtered-params.txt"${RESET}
+    fi
+
+    echo "find_js_files_secrets" > "${OUTPUT_DIR}/last_step.txt"
+# Run the Python script to sort and limit the parameters
+    python3 - <<EOF
+with open("${OUTPUT_DIR}/filtered-params.txt", "r") as file:
+    lines = file.readlines()
+
+lines.sort()
+
+lines = lines[:100000]
+
+with open("${OUTPUT_DIR}/sorted-params-100000.txt", "w") as file:
+    file.writelines(lines)
+EOF
+
+    echo "find_js_files_secrets" > "${OUTPUT_DIR}/last_step.txt"
+}
+
 
 # KATANA FUNCTION
 run_katana() {
@@ -349,7 +442,7 @@ run_katana() {
     log "Running katana"
 
     hide_cursor  # Hide cursor before running the tool
-    katana -d "${TARGET}" $KATANA_FLAGS -o "${OUTPUT_DIR}/katana-output.txt" &
+    katana --list "$ABSOLUTE_ALIVE_SUBS_FILE" $KATANA_FLAGS -o "${OUTPUT_DIR}/katana-output.txt" &
     CURRENT_PID=$!
     show_spinner $CURRENT_PID
     wait $CURRENT_PID
@@ -362,6 +455,87 @@ run_katana() {
     fi
     echo "run_katana" > "${OUTPUT_DIR}/last_step.txt"
 }
+
+# Function to process Katana output and run additional commands
+process_katana_output() {
+    trap 'trap_signal' SIGQUIT
+    SKIP_CURRENT=false
+    log "Processing Katana output"
+
+    hide_cursor  # Hide cursor before running the tool
+
+    if [[ -s "${OUTPUT_DIR}/katana-output.txt" ]]; then
+        (
+            cat "${OUTPUT_DIR}/katana-output.txt" | grep -E "\.txt|\.log|\.cache|\.secret|\.db|\.backup|\.yml|\.json|\.gz|\.rar|\.zip|\.config" > "${OUTPUT_DIR}/katana-filtered-output.txt" &
+            CURRENT_PID=$!
+            show_spinner $CURRENT_PID
+            wait $CURRENT_PID
+
+            cat "${OUTPUT_DIR}/katana-output.txt" | grep -E "\.js$" >> "${OUTPUT_DIR}/katana-js.txt" &
+            CURRENT_PID=$!
+            show_spinner $CURRENT_PID
+            wait $CURRENT_PID
+
+            if [[ -s "${OUTPUT_DIR}/katana-js.txt" ]]; then
+                cat "${OUTPUT_DIR}/katana-js.txt" | nuclei -t /usr/share/nuclei-templates/http/exposures/ &
+                CURRENT_PID=$!
+                show_spinner $CURRENT_PID
+                wait $CURRENT_PID
+
+                while IFS= read -r domain; do
+                    echo "$domain" | katana -ps | grep -E "\.js$" | nuclei -t /usr/share/nuclei-templates/http/exposures/ -c 30 &
+                    CURRENT_PID=$!
+                    show_spinner $CURRENT_PID
+                    wait $CURRENT_PID
+                done < "$ABSOLUTE_ALIVE_SUBS_FILE"
+
+                log "Katana output processing completed"
+            else
+                log "No JavaScript files found in Katana output"
+            fi
+            show_cursor  # Show cursor after the tool has finished
+        )
+    else
+        log "Katana output file does not exist or is empty: katana-output.txt"
+    fi
+
+    echo "process_katana_output" > "${OUTPUT_DIR}/last_step.txt"
+}
+
+
+# Function to run dirsearch with extensions
+run_dirsearch_extensions() {
+    trap 'trap_signal SIGQUIT' SIGQUIT
+    trap 'trap_signal SIGINT' SIGINT
+    SKIP_CURRENT=false
+    log "Running dirsearch with extensions"
+
+    hide_cursor  # Hide cursor before running the tool
+
+    # ABSOLUTE PATH OF THE ALIVE SUBDOMAINS FILE
+    ABSOLUTE_ALIVE_SUBS_FILE="$(realpath "${OUTPUT_DIR}/alive-subs.txt")"
+
+    # Check if the file exists
+    if [[ -f "$ABSOLUTE_ALIVE_SUBS_FILE" ]]; then
+        EXTENSIONS_OUTPUT="${OUTPUT_DIR}/dirsearch-extensions-output.txt"
+        dirsearch -l "$ABSOLUTE_ALIVE_SUBS_FILE" -e "conf,config,bak,backup,swp,old,db,sql,asp,aspx,asp~,py,py~,rb,rb-,php,php~,bak,bkp,cache,cgi,conf,csv,html,inc,jar,js,json,jsp,jsp~,lock,log,rar,old,sql,sql.gz,http,sql.zip,sql.tar.gz,sql-,swp,swp~,tar,tar.bz" -o "$EXTENSIONS_OUTPUT" &
+        CURRENT_PID=$!
+        show_spinner $CURRENT_PID
+        wait $CURRENT_PID
+        show_cursor  # Show cursor after the tool has finished
+
+        if [ "$SKIP_CURRENT" = true ]; then
+            log "Dirsearch with extensions skipped"
+        else
+            log "Dirsearch with extensions completed"
+        fi
+    else
+        error_exit ${RED}"The file containing URLs does not exist: $ABSOLUTE_ALIVE_SUBS_FILE"${RESET}
+    fi
+
+    echo "run_dirsearch_extensions" > "${OUTPUT_DIR}/last_step.txt"
+}
+
 
 # Function to resume the script from the last step
 resume_from_last_step() {
@@ -445,6 +619,11 @@ main() {
     fi
     if [[ $last_step != "run_katana" ]]; then
         run_katana
+
+    if [[ $last_step != "process_katana_output" ]]; then
+        process_katana_output
+    fi
+
     fi
     if [[ $last_step != "run_dirsearch_extensions" ]]; then
         run_dirsearch_extensions
