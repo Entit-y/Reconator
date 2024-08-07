@@ -111,7 +111,7 @@ prompt_user() {
 
         echo -e "${GREEN}Enter the custom flags for nuclei (default: -c 70 -rl 200 -fhr -lfa):${RESET}"
         read -r NUCLEI_FLAGS
-        NUCLEI_FLAGS=${NUCLEI_FLAGS:-"-c 70 -rl 200 -fhr -lfa"}
+        NUCLEI_FLAGS=${NUCLEI_FLAGS:-"-c 70 -rl 200 -fhr -lfa -no-mhe"}
 
         echo -e "${GREEN}Enter the custom flags for katana (default: -d 5 -ps -pss waybackarchive,commoncrawl,alienvault -kf -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif,svg):${RESET}"
         read -r KATANA_FLAGS
