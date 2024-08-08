@@ -583,12 +583,11 @@ main() {
     echo "By Enit-y     github: https://github.com/Entit-y"
     echo -e "${RESET}"
 
-    # Ensure required tools are installed
+    # Check for if the required tools are installed
     for tool in subfinder httpx naabu dirsearch gau uro secretfinder nuclei katana; do
         check_command "$tool"
     done
 
-    # PROMPTING USER FOR INPUT
     prompt_user
 
     # CHECK THE CHECKPOINT
