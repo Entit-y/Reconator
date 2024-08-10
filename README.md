@@ -3,7 +3,7 @@ Reconator is a powerful Bash script designed to automate the process of domain r
 
 ## Prerequisites
 
-Before running the script, ensure that the following tools are installed on your system:
+Before running the script, ensure that the following tools are installed and accessible in your system's PATH:
 
 - [Subfinder](https://github.com/projectdiscovery/subfinder)
 - [Httpx](https://github.com/projectdiscovery/httpx)
