@@ -29,7 +29,7 @@ To install Reconator, follow these steps:
 
 ## Usage
 
-Navigate to the clone repository and use the following command to run the script:
+Navigate to the cloned repository and use the following command to run the script:
 
 ```bash
 ./reconator
