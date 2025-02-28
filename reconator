@@ -178,23 +178,18 @@ trap 'trap_signal SIGTERM' SIGTERM
 # FUNCTION TO RUN CRT.SH
 run_crtsh() {
     local domain="$1"
+    local escaped_domain
+    escaped_domain=$(printf "%s" "$domain" | sed 's/\./\\./g')
     local crtsh_file="${OUTPUT_DIR}/crtsh-subdomains.txt"
     
     log "Running crt.sh for domain: $domain"
-    curl -s "https://crt.sh/?q=${domain}&output=json" | jq -r '.[].name_value' | grep -Po '(\w+\.\w+\.\w+)$' | sort -u | tee -a "$crtsh_file"
-
-    # Compare with subfinder output
-    local new_subdomains="${OUTPUT_DIR}/new-subdomains.txt"
-    comm -13 <(sort "$SUBDOMAIN_FILE" | uniq) <(sort "$crtsh_file" | uniq) > "$new_subdomains"
-
-    # Log new subdomains found
-    if [[ -s "$new_subdomains" ]]; then
-        log "New subdomains found by crt.sh:"
-        cat "$new_subdomains" | tee -a "$SUBDOMAIN_FILE"
-    else
-        log "No new subdomains found by crt.sh for domain: $domain"
-    fi
+    curl -s "https://crt.sh/?q=${domain}&output=json" \
+      | jq -r '.[].name_value' \
+      | grep -Po "(\*?[A-Za-z0-9-]+\.)+${escaped_domain}" \
+      | sort -u \
+      | tee -a "$crtsh_file"
 }
+
 
 # SUBFINDER FUNCTION
 run_subfinder() {
